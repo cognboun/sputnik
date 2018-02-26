@@ -1,0 +1,623 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*
+#
+# Copyright 2011 shuotao.me
+# Copyright 2012 msx.com
+# Copyright 2013 msx.com
+# Copyright 2014 lrzm.com
+# by error.d@gmail.com
+# 2014-12-17
+#
+# Sputnik Master Server
+#
+
+"""Sputnik Master Server
+"""
+
+import json
+import time
+import copy
+import thread
+import threading
+import logging
+import requests
+import tornado.ioloop
+import tornado.httpclient as httpclient
+import tornado.web
+from tornado.options import define, options, parse_command_line, print_help
+from sputnik import sputnik_init
+
+debug_logging_config = {
+    'log_slow' : False,
+    'log_slow_time' : 500,
+    'log_function' : {
+    'all' : True,
+    'flowpath' : {
+    'all' : True,
+    'flowpath' : True,
+    'logic' : True,
+    'service' : True,
+    'db' : True,
+    'cache' : True
+    },
+    'perf' : {
+    'all' : True,
+    'perf' : True,
+    'func' : True,
+    'service' : True,
+    'db' : True,
+    'cache' : True
+    }
+    }
+    }
+
+sputnik_init(debug_logging_config)
+logging.getLogger().setLevel(logging.INFO)
+
+define("debug", default=False, help="debug mode", type=bool)
+define("port",
+       default=8000,
+       help="spumaster listen port",
+       type=int)
+
+def spusys_api(ip, port, module, function, args_rule=None, args=None):
+    try:
+        url = 'http://%s:%s/sputnik.SpuSys/%s/%s' % (
+            ip, port, module, function)
+        if args_rule:
+            url += args_rule
+        if args:
+            url = url % args
+        res = requests.get(url)
+    except Exception as m:
+        msg = m
+        return (500, 'http exception msg:%s' % msg)
+
+    if not res.ok:
+        return (500, 'http unknow failed text:%s' % res.text)
+
+    try:
+        res_json = res.json()
+    except Exception as m:
+        return (500, 'to json failed msg:%s result:%s' % (m, res.text))
+
+    if res_json['status'] != 200:
+        return (500, 'application failed msg:%s' % res_json['msg'])
+
+    return (200, res_json['result'])
+
+class ThreadRLock(object):
+    def __init__(self):
+        self._lock = threading.RLock()
+        logging.info('create lock_id:%s', id(self._lock))
+
+    def acquire(self):
+        logging.info('lock_id:%s acquire', id(self._lock))
+        return self._lock.acquire()
+
+    def release(self):
+        logging.info('lock_id:%s release', id(self._lock))
+        self._lock.release()
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.release()
+        if exc_tb:
+            return False
+        return True
+
+class SpuProcessInfo(object):
+    PROCESS_ALIVE = 1
+    PROCESS_DEAD = 2
+    
+    def __init__(self, ip, port, pid, status=PROCESS_ALIVE):
+        self.ip = ip
+        self.port = port
+        self.pid = pid
+        self.status = status
+
+    def status_text(self):
+        return 'alive' if self.status == self.PROCESS_ALIVE else \
+               'dead'
+
+    def alive(self):
+        self.status = self.PROCESS_ALIVE
+
+    def dead(self):
+        self.status = self.PROCESS_DEAD
+
+    def is_alive(self):
+        return self.status == self.PROCESS_ALIVE
+
+    def process_info(self):
+        return {'ip': self.ip, 'port': self.port,
+                'pid': self.pid, 'status': self.status_text()}
+
+class SpuMaster(object):
+    # key: ip_port  value: SpuProcessInfo
+    sputnik_process_map = {}
+    # [SpuProcessInfo]
+    sputnik_process = []
+    # key: ip  value: [SpuProcessInfo]
+    sputnik_process_ip = {}
+
+    lock = ThreadRLock()
+    
+    def __init__(self):
+        pass
+
+    def _add_new_sputnik_process(self, ip, port, pid):
+        sp_info = SpuProcessInfo(ip, port, pid)
+        self.sputnik_process.append(sp_info)
+        if self.sputnik_process_ip.has_key(ip):
+            self.sputnik_process_ip[ip].append(sp_info)
+        else:
+            self.sputnik_process_ip[ip] = [sp_info]
+        return sp_info
+
+    def register_sputnik_process(self, ip, port, pid):
+        with self.lock:
+            map_key = '%s_%s' % (ip, port)
+            if self.sputnik_process_map.has_key(map_key):
+                logging.info('Reregister sputnik process ip:%s port:%s' % (ip, port))
+                sp_info = self.sputnik_process_map[map_key]
+                sp_info.alive()
+            else:
+                logging.info('Newregister sputnik process ip:%s port:%s' % (ip, port))
+                sp_info = self._add_new_sputnik_process(ip, port, pid)
+                self.sputnik_process_map[map_key] = sp_info
+
+    def _spu_process_list_by_status(self, status):
+        process_list = []
+        with self.lock:
+            for spu_process in self.sputnik_process:
+                if spu_process.status == status:
+                    process_list.append(spu_process)
+        return process_list
+
+    # use two list?
+    def _alive_spu_process(self):
+        return self._spu_process_list_by_status(SpuProcessInfo.PROCESS_ALIVE)
+    
+    def _dead_spu_process(self):
+        return self._spu_process_list_by_status(SpuProcessInfo.PROCESS_DEAD)
+    
+    def sputnik_info(self):
+        sinfo = {}
+        with self.lock:
+            ip_count = len(self.sputnik_process_ip)
+            alive_list = self._alive_spu_process()
+            dead_list = self._dead_spu_process()
+            sinfo = {
+                'ip_count': ip_count,
+                'alive_count': len(alive_list),
+                'dead_count': len(dead_list)
+                }
+        return sinfo
+
+    def sputnik_ip_list(self):
+        keys = []
+        with self.lock:
+            keys = self.sputnik_process_ip.keys()
+        return keys
+
+    def sputnik_process_list_all(self):
+        list_all = []        
+        with self.lock:
+            list_all = [spu_info.process_info() for spu_info in \
+                        self.sputnik_process]
+        return list_all
+
+    def sputnik_process_list(self, ip):
+        process_list = []
+        with self.lock:
+            process_list = [spu_info.process_info() for spu_info \
+                            in self.sputnik_process_ip.get(ip, [])]
+        return process_list
+
+    # remove sputnik process api
+
+    def _parse_process_list(self, process_list):
+        ip_port_list = []
+        try:
+            process_list = process_list.split(',')
+        except Exception:
+            logging.error('parse_process_list process_list format ' \
+                          'error process_list: %s', process_list)
+            return []
+
+        for process in process_list:
+            try:
+                ip, port = process.split(':')
+            except Exception:
+                logging.error('parse_process_list process format error process: %s',
+                              process)
+                continue
+            ip_port_list.append((ip, port))
+        return ip_port_list
+
+    def remote_process_api(self, module, api,
+                           args_rule=None, args=None,
+                           process_list=None):
+        data_list = []
+        sputnik_process = []
+        if process_list and process_list != '\'\'':
+            process_list = self._parse_process_list(process_list)
+            if not process_list:
+                return []
+            for (ip, port) in process_list:
+                key = '%s_%s' % (ip, port)
+                if not self.sputnik_process_map.has_key(key):
+                    logging.error('remote_process_api no key %s', key)
+                    continue
+                sputnik_process.append(self.sputnik_process_map[key])
+        else:
+            sputnik_process = self._alive_spu_process()
+        msg = None
+        for spu_info in sputnik_process:
+            ip = spu_info.ip
+            port = spu_info.port
+            (status_code, data) = spusys_api(ip, port, module, api,
+                                             args_rule, args)
+            data_list.append([status_code, ip, port, data])
+        return data_list        
+
+spu_master = SpuMaster()
+
+class Alive(threading.Thread):
+    def __init__(self, interval=10, async_ping=True):
+        """
+        interval: check alive interval default 10 second
+        """
+        super(Alive, self).__init__()
+        self._interval = interval
+        self._running = False
+        self._wait_event = None
+        self._ioloop = None
+        if async_ping:
+            (self._run_func, self._stop_func) = (self._async_schedule_run, \
+                                                 self._async_schedule_stop)
+            async_http_client = "tornado.curl_httpclient.CurlAsyncHTTPClient"
+            httpclient.AsyncHTTPClient.configure(async_http_client)
+            self._ping = self._async_ping
+        else:
+            (self._run_func, self._stop_func) = (self._sync_schedule_run, \
+                                                 self._sync_schedule_stop)
+            self._ping = self._sync_ping
+
+        logging.info('Alive ping mode:%s', 
+                     'async' if async_ping else 'sync')
+
+    def _async_ping(self, spu_info):
+        ip = spu_info.ip
+        port = spu_info.port
+
+        def handle_request(response):
+            logging.debug('async pint result status_code:%s request_time:%s ' \
+                          'error:%s' % (response.code,
+                                        response.request_time,
+                                        response.error))
+            if response.error:
+                logging.info('!!!!! *Dead* %s:%s %s', ip, port, response.error)
+                spu_info.dead()
+            else:
+                logging.info('*Alive* %s:%s', ip, port)
+                spu_info.alive()
+
+        api_url = 'http://%s:%s/sputnik.SpuSys/alive/ping' % (ip, port)
+        http_client = httpclient.AsyncHTTPClient(io_loop=self._ioloop)
+        http_client.fetch(api_url, handle_request,
+                          connect_timeout=1, request_timeout=1)
+
+    def _sync_ping(self, spu_info):
+        ip, port = spu_info.ip, spu_info.port
+        (status_code, data) = spusys_api(ip, port, 'alive', 'ping')
+        if status_code != 200 or data['status'] != 'ok':
+            logging.info('!!!!! *Dead* %s:%s %s', ip, port, data)
+            spu_info.dead()
+        else:
+            logging.info('*Alive* %s:%s', ip, port)
+            spu_info.alive()
+
+    def _sleep_time(self):
+        return time.time() + self._interval
+
+    def _async_alive_callback(self):
+        logging.info('Alive check run ...')
+        sputnik_process = []
+        with spu_master.lock:
+            sputnik_process = copy.copy(spu_master.sputnik_process)
+        for spu_info in sputnik_process:
+            logging.debug('check in %s', spu_info.process_info())
+            self._ping(spu_info)
+        self._ioloop.add_timeout(self._sleep_time(),
+                                 self._async_alive_callback)
+
+    def _async_schedule_run(self):
+        self._running = True
+        self._ioloop = tornado.ioloop.IOLoop()
+        self._ioloop.add_timeout(self._sleep_time(),
+                                 self._async_alive_callback)
+        self._ioloop.start()
+
+    def _sync_schedule_run(self):
+        self._running = True
+        self._wait_event = threading.Event()
+        while self._running:
+            logging.info('Alive check run ...')
+            sputnik_process = []
+            with spu_master.lock:
+                sputnik_process = copy.copy(spu_master.sputnik_process)
+            for spu_info in sputnik_process:
+                logging.debug('check in %s', spu_info.process_info())
+                self._ping(spu_info)
+
+            self._wait_event.wait(self._interval)
+
+    def _sync_schedule_stop(self):
+        self._wait_event.set()
+
+    def _async_schedule_stop(self):
+        self._ioloop.stop()
+
+    def run(self):
+        tid = thread.get_ident()
+        logging.info('Alive Thread(0x%x) Run ...', tid)
+        self._run_func()
+        logging.info('Alive Thread(0x%x) Exit ...', tid)
+
+    def stop(self):
+        self._running = False
+        self._stop_func()
+
+class DocsHandler(tornado.web.RequestHandler):
+    def get(self):
+        docs = """
+        /register_sputnik_process/ip=(.+?)&port=(.+?)&pid=(.+?)<br>
+        /process/sputnik_info<br>
+        /process/sputnik_ip_list<br>
+        /process/sputnik_process_list_all<br>
+        /process/sputnik_process_list/ip=(.+?)<br>
+        /sysinfo/version<br>
+        /sysinfo/process_start_time<br>
+        /sysinfo/process_run_time<br>
+        /sysinfo/all<br>
+        /tornado/ioloop_info<br>
+        /cache/cache_info<br>
+        /cache/set_value/process_list=(.*?)&cache_type=(.+?)&key=(.+?)&value=(.+?)&expire=(.*?)<br>
+        /cache/get_value/process_list=(.*?)&cache_type=(.+?)&key=(.+?)<br>
+        /cache/remove/process_list=(.*?)&cache_type=(.+?)&key=(.+?)<br>
+        /cache/keys/process_list=(.*?)&cache_type=(.+?)&key_rule=(.+?)<br>
+        /cache/process_original_keys/process_list=(.*?)&key_rule=(.+?)<br>
+        /cache/cache_size/process_list=(.*?)&cache_type=(.+?)<br>
+        /cache/get_all/process_list=(.*?)&cache_type=(.+?)<br>
+        /cache/expire/process_list=(.*?)&cache_type=(.+?)&key=(.+?)&expire_time=(.+?)<br>
+        /cache/ttl/process_list=(.*?)&cache_type=(.+?)&key=(.+?)<br>
+    """
+        self.write("docs:<br>%s" % docs)
+
+class MainHandler(tornado.web.RequestHandler):
+    def get(self):
+        self.write("Sputnik Master Server")
+
+# sputnik
+
+class SputnikInfo(tornado.web.RequestHandler):
+    def get(self):
+        sinfo = spu_master.sputnik_info()
+        self.write(json.dumps(sinfo))
+
+class RegisterSputnikProcess(tornado.web.RequestHandler):
+    def get(self, ip, port, pid):
+        spu_master.register_sputnik_process(ip, port, pid)
+        self.write('ok')
+
+class SputnikIpList(tornado.web.RequestHandler):
+    def get(self):
+        ip_list = spu_master.sputnik_ip_list()
+        self.write(json.dumps(ip_list))
+
+class SputnikProcessListAll(tornado.web.RequestHandler):
+    def get(self):
+        process_list = spu_master.sputnik_process_list_all()
+        self.write(json.dumps(process_list))
+
+class SputnikProcessList(tornado.web.RequestHandler):
+    def get(self, ip):
+        process_list = spu_master.sputnik_process_list(ip)
+        self.write(json.dumps(process_list))
+
+# system info
+
+class Version(tornado.web.RequestHandler):
+    def get(self):
+        version_list = spu_master.remote_process_api('sysinfo', 'version')
+        self.write(json.dumps(version_list))
+
+class ProcessStartTime(tornado.web.RequestHandler):
+    def get(self):
+        data_list = spu_master.remote_process_api('sysinfo', 'process_start_time')
+        self.write(json.dumps(data_list))
+
+class ProcessRunTime(tornado.web.RequestHandler):
+    def get(self):
+        data_list = spu_master.remote_process_api('sysinfo', 'process_run_time')
+        self.write(json.dumps(data_list))
+
+class SysinfoAll(tornado.web.RequestHandler):
+    def get(self):
+        data_list = spu_master.remote_process_api('sysinfo', 'all')
+        self.write(json.dumps(data_list))
+
+class TornadoIoloopInfo(tornado.web.RequestHandler):
+    def get(self):
+        data_list = spu_master.remote_process_api('tornado_sys', 'ioloop_info')
+        self.write(json.dumps(data_list))
+
+# cache
+
+cache_action_args_rule = '/cache_type=%s&action=%s&%s'
+cache_action_no_args_rule = '/cache_type=%s&action=%s'
+
+class CacheInfo(tornado.web.RequestHandler):
+    def get(self):
+        data_list = spu_master.remote_process_api('cache', 'cache_info')
+        self.write(json.dumps(data_list))
+
+class Cache_SetValue(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key, value, expire):
+        if expire == '' or expire == None or expire == '\'\'':
+            expire = 0
+        args = 'key=%s&value=%s&expire=%s' % (key, value, expire)
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'set_value', args),
+                                                  process_list)
+               
+        self.write(json.dumps(data_list))
+
+class Cache_GetValue(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key):
+        args = 'key=%s' % key
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'get_value', args),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_Remove(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key):
+        args = 'key=%s' % key
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'remove', args),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_Keys(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key_rule):
+        args = 'key_rule=%s' % key_rule
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'keys', args),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_Process_Original_Keys(tornado.web.RequestHandler):
+    def get(self, process_list, key_rule):
+        data_list = spu_master.remote_process_api('cache',
+                                                  'process_cache_original_keys',
+                                                  '/key_rule=%s', (key_rule),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_CacheSize(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type):
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_no_args_rule,
+                                                  (cache_type, 'cache_size'),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_GetAll(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type):
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_no_args_rule,
+                                                  (cache_type, 'get_all'),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_Expire(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key, expire_time):
+        args = 'key=%s&expire_time=%s' % (key, expire_time)
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'expire', args),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+class Cache_TTL(tornado.web.RequestHandler):
+    def get(self, process_list, cache_type, key):
+        args = 'key=%s' % key
+        data_list = spu_master.remote_process_api('cache', 'cache_action',
+                                                  cache_action_args_rule,
+                                                  (cache_type, 'ttl', args),
+                                                  process_list)
+        self.write(json.dumps(data_list))
+
+application = tornado.web.Application([
+    (r"/", MainHandler),
+    (r"/docs", DocsHandler),
+    (r"/register_sputnik_process/ip=(.+?)&port=(.+?)&pid=(.+?)",
+     RegisterSputnikProcess),
+    # process api
+    (r"/process/sputnik_info",
+     SputnikInfo),
+    (r"/process/sputnik_ip_list",
+     SputnikIpList),
+    (r"/process/sputnik_process_list_all",
+     SputnikProcessListAll),
+    (r"/process/sputnik_process_list/ip=(.+?)",
+     SputnikProcessList),
+    # sputnik sys info
+    (r"/sysinfo/version",
+     Version),
+    (r"/sysinfo/process_start_time",
+     ProcessStartTime),
+    (r"/sysinfo/process_run_time",
+     ProcessRunTime),
+    (r"/sysinfo/all",
+     SysinfoAll),
+    # tornado
+    (r"/tornado/ioloop_info",
+     TornadoIoloopInfo),
+    # cache api
+    (r"/cache/cache_info",
+     CacheInfo),
+    (r"/cache/set_value/process_list=(.*?)&cache_type=(.+?)&key=(.+?)&value=(.+?)&expire=(.*?)",
+     Cache_SetValue),
+    (r"/cache/get_value/process_list=(.*?)&cache_type=(.+?)&key=(.+?)",
+     Cache_GetValue),
+    (r"/cache/remove/process_list=(.*?)&cache_type=(.+?)&key=(.+?)",
+     Cache_Remove),
+    (r"/cache/keys/process_list=(.*?)&cache_type=(.+?)&key_rule=(.+?)",
+     Cache_Keys),
+    (r"/cache/process_original_keys/process_list=(.*?)&key_rule=(.+?)",
+     Cache_Process_Original_Keys),
+    (r"/cache/cache_size/process_list=(.*?)&cache_type=(.+?)",
+     Cache_CacheSize),
+    (r"/cache/get_all/process_list=(.*?)&cache_type=(.+?)",
+     Cache_GetAll),
+    (r"/cache/expire/process_list=(.*?)&cache_type=(.+?)&key=(.+?)&expire_time=(.+?)",
+     Cache_Expire),
+    (r"/cache/ttl/process_list=(.*?)&cache_type=(.+?)&key=(.+?)",
+     Cache_TTL),
+    ])
+
+def main(port, debug):
+    if debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    tid = thread.get_ident()
+    logging.info('Main Thread(0x%x) Run ...', tid)
+    alive_thread = Alive()
+    alive_thread.start()
+
+    application.listen(port)
+    try:
+        time.sleep(2)
+        ioloop = tornado.ioloop.IOLoop.instance()
+        tornado.ioloop.IOLoop.instance().start()
+    except KeyboardInterrupt:
+        logging.info('stop ...')
+        alive_thread.stop()
+    logging.info('Main Thread(0x%x) Exit ...', tid)
+
+if __name__ == "__main__":
+    parse_command_line()
+    if not options.port:
+        print_help()
+    else:
+        main(options.port, options.debug)

@@ -1,0 +1,11 @@
+
+service manager:
+  服务注册
+  创建服务
+  管理服务配置，pull模式更新，push模式更新（被动更新）
+
+service config server:
+  全局服务注册
+  服务路由管理
+  服务配置管理
+  服务版本管理

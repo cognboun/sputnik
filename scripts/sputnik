@@ -1,0 +1,11 @@
+#!/usr/bin/env python
+# Copyright 2012 msx.com
+# by error.d@gmail.com
+# 
+# Sputnik
+#
+
+command = None
+project_name = None
+
+print 'hello sputnik'

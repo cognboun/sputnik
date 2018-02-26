@@ -1,0 +1,16 @@
+* TODO bug [0/1] [0%] 
+  - [ ] format失效 <2013-01-18 五>
+    http://xxx.com/search/q/place?city_id=2&area=2282&format=json
+    url path是xx?aa=xx&bb=xx时失效?
+
+* TODO cache [0/0] [0%] <2013-01-18 五>
+
+* sql生成 <2013-01-18 五>
+** TODO join语句 [1/1] [100%]
+   - [X] 1. 基本生成
+
+** TODO 单句(n+1) [0/0] [0%]
+
+* TODO api重构 [0/0] [0%] <2013-01-18 五>
+
+* TODO 对象模型 [0/0] [0%] <2013-01-18 五>

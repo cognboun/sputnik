@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*
+#
+# Copyright 2011 shuotao.me
+# Copyright 2012 msx.com
+# Copyright 2013 msx.com
+# Copyright 2014 lrzm.com
+# by error.d@gmail.com
+# 2014-12-17
+#
+# Sputnik Fast Message Queue Server
+#
+
+"""Sputnik Fast Message Queue Server
+"""
+
+import logging
+
+from sputnik import sputnik_init
+debug_logging_config = {
+    'log_slow' : False,
+    'log_slow_time' : 500,
+    'log_function' : {
+    'all' : True,
+    'flowpath' : {
+    'all' : True,
+    'flowpath' : True,
+    'logic' : True,
+    'service' : True,
+    'db' : True,
+    'cache' : True
+    },
+    'perf' : {
+    'all' : True,
+    'perf' : True,
+    'func' : True,
+    'service' : True,
+    'db' : True,
+    'cache' : True
+    }
+    }
+    }
+
+sputnik_init(debug_logging_config)
+
+from tornado.options import define, options, parse_command_line, print_help
+from sputnik.SpuFastMQ import SpuFastMQServer
+
+
+define("pub_addr",
+       default=None,
+       help="publish server bind address like tcp://*:2222 or ipc://temp/fastmq",
+       type=str)
+
+define("mq_addr",
+       default=None,
+       help="message queue address like tcp://*:2222 or ipc://temp/fastmq",
+       type=str)
+
+define("io_threads",
+       default=1,
+       help="io threads number",
+       type=int)
+
+define("debug", default=False, help="debug mode", type=bool)
+
+def main(pub_addr, mq_addr, debug, io_threads=1):
+    if debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
+
+    fmq = SpuFastMQServer(pub_addr, mq_addr, io_threads)
+    fmq.message_dispatch()
+
+if __name__ == "__main__":
+    parse_command_line()
+    if not options.pub_addr or not options.mq_addr:
+        print_help()
+    else:
+        main(options.pub_addr, options.mq_addr, options.debug, options.io_threads)

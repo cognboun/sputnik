@@ -1,0 +1,6 @@
+http://openapi.qzone.qq.com/oauth/show?redirect_uri=http%3A%2F%2Fwww.msx.com%3A8889%2Finvite%2Finvite%2Fqq_connect_post&client_id=100241331&response_type=code&which=ConfirmPage
+
+
+
+
+http://openapi.qzone.qq.com/oauth/show?which=ConfirmPage&response_type=code&client_id=100241331&redirect_uri=http%3A%2F%2Fwww.msx.com%2Finvite%2Finvite%2Fqq_connect_post

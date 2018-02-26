@@ -1,0 +1,59 @@
+#-*- coding: utf-8 -*
+#
+# Copyright 2011 shuotao.me
+# Copyright 2012 msx.com
+# Copyright 2013 msx.com
+# Copyright 2014 lrzm.com
+# by error.d@gmail.com
+# 2014-9-19
+# 
+# Sputnik Call Tracker
+#
+
+import sys
+import os
+sys.path.append(os.getcwd())
+from sputnik.SpuCallTracker import CallTrackerEngine
+from sputnik import enable_pretty_logging
+
+enable_pretty_logging()
+
+def module_object(module):
+    module = module.split(".")[0]
+    try:
+        m = __import__(module)
+    except Exception as e:
+        print "Load module failed: %s" % e
+        return None
+    return m
+
+def call_track(module, args, track_file='call_tracker.log'):
+    print "CallTracker %s args:%s" % (module, ' '.join(args))
+    print "Call track write to %s" % track_file
+
+    main_module = module_object(module)
+    if not main_module:
+        return
+
+    if not hasattr(main_module, 'calltrack_main'):
+        print '%s Not calltrack_main function\nPlease add calltrack_main to %s' % (
+            module, module)
+        return
+
+    cte = CallTrackerEngine(track_file, import_module=main_module)
+    cte.calltrack_module(main_module)
+    main_module.calltrack_main(*args)
+
+def usage():
+    print "usage: scalltrack pyfile args"
+
+def version():
+    print "scalltrack -- ([Sputnik] -- Python Call Tracker) 0.1.0"
+    print "Copyright (C) 2014 mibang.com\n"
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        usage()
+        sys.exit(0)
+
+    call_track(sys.argv[1], sys.argv[2:])
