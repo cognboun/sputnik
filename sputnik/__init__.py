@@ -18,7 +18,7 @@ from SpuLogging import SpuLogging
 G_INIT = False
 G_DEBUG = None
 
-version = '0.5.5'
+version = '0.5.6'
 
 default_assert_config = {
  'model_field_define_assert' : True
